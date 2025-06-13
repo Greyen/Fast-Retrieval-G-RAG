@@ -14,13 +14,13 @@ from tenacity import (
 )
 
 import logging
-from ..utils import logger
-from ..base import BaseGraphStorage
-from ..types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
-import pipmaster as pm
+from ..yutils import logger
+from ..ybase import BaseGraphStorage
+from ..ytypes import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
+# import pipmaster as pm
 
-if not pm.is_installed("neo4j"):
-    pm.install("neo4j")
+# if not pm.is_installed("neo4j"):
+#     pm.install("neo4j")
 
 from neo4j import (  # type: ignore
     AsyncGraphDatabase,
@@ -47,6 +47,8 @@ config.read("config.ini", "utf-8")
 logging.getLogger("neo4j").setLevel(logging.ERROR)
 
 
+
+# why need super init when we have had @dataclass
 @final
 @dataclass
 class Neo4JStorage(BaseGraphStorage):

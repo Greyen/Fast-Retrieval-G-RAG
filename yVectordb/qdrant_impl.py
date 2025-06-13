@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import hashlib
 import uuid
-from ..utils import logger
+from ..yutils import logger
 from ..ybase import BaseVectorStorage
 import configparser
 import pipmaster as pm
@@ -76,6 +76,11 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             ),
         )
         self._max_batch_size = self.global_config["embedding_batch_num"]
+
+        # Delete the old collection if it exists
+        if self._client.collection_exists(self.namespace):
+            self._client.delete_collection(self.namespace)
+            
         QdrantVectorDBStorage.create_collection_if_not_exist(
             self._client,
             self.namespace,

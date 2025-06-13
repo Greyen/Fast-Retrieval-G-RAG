@@ -1,17 +1,17 @@
-from ..ylightRag.yutils import verbose_debug, VERBOSE_DEBUG
+from ..yutils import verbose_debug, VERBOSE_DEBUG
 import sys
 import os
 import logging
 
-if sys.version_info < (3, 9):
-    from typing import AsyncIterator
-else:
-    from collections.abc import AsyncIterator
-import pipmaster as pm  # Pipmaster for dynamic library install
+# if sys.version_info < (3, 9):
+#     from typing import AsyncIterator
+# else:
+#     from collections.abc import AsyncIterator
+# import pipmaster as pm  # Pipmaster for dynamic library install
 
-# install specific modules
-if not pm.is_installed("openai"):
-    pm.install("openai")
+# # install specific modules
+# if not pm.is_installed("openai"):
+#     pm.install("openai")
 
 from openai import (
     AsyncOpenAI,
@@ -32,7 +32,7 @@ from ylightRag.yutils import (
     logger,
 )
 from ylightRag.ytypes import GPTKeywordExtractionFormat
-from ylightRag.api import __api_version__
+# from ylightRag.api import __api_version__
 
 import numpy as np
 from typing import Any, Union
@@ -66,7 +66,7 @@ def create_openai_async_client(
         api_key = os.environ["OPENAI_API_KEY"]
 
     default_headers = {
-        "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/{__api_version__}",
+        # "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/{__api_version__}",
         "Content-Type": "application/json",
     }
 

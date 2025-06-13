@@ -1,29 +1,51 @@
-
-
+import asyncio
+import traceback
+from datetime import datetime , timezone
 from ylightRag.yutils import get_env_value
 from .ytypes import KnowledgeGraph
 from dotenv import load_dotenv
 
-from typing import Optional,Callable , List ,Dict,Any
-from dataclasses import field
+from typing import Optional,Callable , List ,Dict,Any , cast ,AsyncIterator , final
+from dataclasses import field ,dataclass , asdict 
 from datetime import datetime
 
 from .ykg.neo4j_impl import Neo4JStorage
-from .yVectordb import QdrantVectorDBStorage
 from .ybase import BaseGraphStorage
 from .ybase import BaseVectorStorage
+from .ybase import BaseKVStorage
+from .yVectordb.qdrant_impl import QdrantVectorDBStorage
+from .yKV.json_kv_impl import JsonKVStorage
+from .yKV.json_doc_status_impl import JsonDocStatusStorage
 
+from ylightRag.ykg.shared_storage import (
+    get_namespace_data,
+    get_pipeline_status_lock,
+)
 from .yutils import (
     Tokenizer ,
     EmbeddingFunc,
     clean_text ,
     compute_mdhash_id ,
+    logger,
+    get_content_summary,
+    TiktokenTokenizer
     )
-from .yoperate import  chunking_by_token_size
+from .yoperate import  (chunking_by_token_size,
+                        merge_nodes_and_edges,
+                        kg_query,
+                        extract_entities)
 import os
+
+from .ynamespace import NameSpace , make_namespace
 
 from .ybase import (
     StoragesStatus,
+    DocStatus,
+    DocStatusStorage,
+    DocProcessingStatus,
+    StorageNameSpace,
+    QueryParam,
+    
 )
 
 from ylightRag.yconstants import (
@@ -50,20 +72,22 @@ class LightRAG:
     # Storage
     # ---
 
-    # kv_storage: str = field(default="JsonKVStorage")
     # """Storage backend for key-value data."""
-
     # using JSON kv for llm cache response etc
-
-    # vector_storage: BaseVectorStorage = QdrantVectorDBStorage
+    kv_storage: BaseKVStorage = JsonKVStorage
+    
     # """Storage backend for vector embeddings."""
-
     # using qdrant for storing the vector 
+    vector_storage: BaseVectorStorage  = QdrantVectorDBStorage
+    
 
-    # graph_storage: BaseGraphStorage = Neo4JStorage
     # """Storage backend for knowledge graphs."""
-
     # using neo4J for the graphs
+    graph_storage: BaseGraphStorage  = Neo4JStorage
+
+    doc_status_storage: BaseKVStorage = JsonDocStatusStorage
+    """Storage type for tracking document processing statuses."""
+    
 
     # Entity extraction
     # ---
@@ -73,6 +97,12 @@ class LightRAG:
 
     summary_to_max_tokens: int = field(
         default=get_env_value("MAX_TOKEN_SUMMARY", DEFAULT_MAX_TOKEN_SUMMARY, int)
+    )
+
+    force_llm_summary_on_merge: int = field(
+        default=get_env_value(
+            "FORCE_LLM_SUMMARY_ON_MERGE", DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int
+        )
     )
 
     # Text chunking
@@ -141,13 +171,13 @@ class LightRAG:
     )
     """Maximum number of concurrent embedding function calls."""
 
-    # embedding_cache_config: dict[str, Any] = field(
-    #     default_factory=lambda: {
-    #         "enabled": False,
-    #         "similarity_threshold": 0.95,
-    #         "use_llm_check": False,
-    #     }
-    # )
+    embedding_cache_config: dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "similarity_threshold": 0.95,
+            "use_llm_check": False,
+        }
+    )
     """Configuration for embedding cache.
     - enabled: If True, enables caching to avoid redundant computations.
     - similarity_threshold: Minimum similarity score to use cached embeddings.
@@ -175,7 +205,7 @@ class LightRAG:
     # Storage
     # ---
 
-    # vector_db_storage_cls_kwargs: dict[str, Any] = field(default_factory=dict)
+    vector_db_storage_cls_kwargs: dict[str, Any] = field(default_factory=dict)
     # """Additional parameters for vector database storage."""
 
     # # TODO：deprecated, remove in the future, use WORKSPACE instead
@@ -225,23 +255,27 @@ class LightRAG:
     _storages_status: StoragesStatus = field(default=StoragesStatus.NOT_CREATED)
     
     def __post_init__(self):
-        from lightrag.kg.shared_storage import (
+        # have to check it
+        from ylightRag.ykg.shared_storage import (
             initialize_share_data,
         )
 
+
+        # have to check it
+
         # Handle deprecated parameters
-        if self.log_level is not None:
-            warnings.warn(
-                "WARNING: log_level parameter is deprecated, use setup_logger in utils.py instead",
-                UserWarning,
-                stacklevel=2,
-            )
-        if self.log_file_path is not None:
-            warnings.warn(
-                "WARNING: log_file_path parameter is deprecated, use setup_logger in utils.py instead",
-                UserWarning,
-                stacklevel=2,
-            )
+        # if self.log_level is not None:
+        #     warnings.warn(
+        #         "WARNING: log_level parameter is deprecated, use setup_logger in utils.py instead",
+        #         UserWarning,
+        #         stacklevel=2,
+        #     )
+        # if self.log_file_path is not None:
+        #     warnings.warn(
+        #         "WARNING: log_file_path parameter is deprecated, use setup_logger in utils.py instead",
+        #         UserWarning,
+        #         stacklevel=2,
+        #     )
 
         # Remove these attributes to prevent their use
         if hasattr(self, "log_level"):
@@ -249,6 +283,9 @@ class LightRAG:
         if hasattr(self, "log_file_path"):
             delattr(self, "log_file_path")
 
+
+
+        # have to check it
         initialize_share_data()
 
         if not os.path.exists(self.working_dir):
@@ -263,11 +300,16 @@ class LightRAG:
             ("DOC_STATUS_STORAGE", self.doc_status_storage),
         ]
 
-        for storage_type, storage_name in storage_configs:
-            # Verify storage implementation compatibility
-            verify_storage_implementation(storage_type, storage_name)
-            # Check environment variables
-            check_storage_env_vars(storage_name)
+        #  redudant
+        # for storage_type, storage_name in storage_configs:
+        #     # Verify storage implementation compatibility
+        #     verify_storage_implementation(storage_type, storage_name)
+        #     # Check environment variables
+        #     check_storage_env_vars(storage_name)
+      
+
+        # have to look into it 
+        # this it to intialize the vector arguments
 
         # Ensure vector_db_storage_cls_kwargs has required fields
         self.vector_db_storage_cls_kwargs = {
@@ -288,37 +330,48 @@ class LightRAG:
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in global_config.items()])
         logger.debug(f"LightRAG init with param:\n  {_print_config}\n")
 
+
+        #  have to check it after 
         # Init Embedding
-        self.embedding_func = priority_limit_async_func_call(
-            self.embedding_func_max_async
-        )(self.embedding_func)
+        # self.embedding_func = priority_limit_async_func_call(
+        #     self.embedding_func_max_async
+        # )(self.embedding_func)
 
         # Initialize all storages
-        self.key_string_value_json_storage_cls: type[BaseKVStorage] = (
-            self._get_storage_class(self.kv_storage)
-        )  # type: ignore
-        self.vector_db_storage_cls: type[BaseVectorStorage] = self._get_storage_class(
-            self.vector_storage
-        )  # type: ignore
-        self.graph_storage_cls: type[BaseGraphStorage] = self._get_storage_class(
-            self.graph_storage
-        )  # type: ignore
+
+        # ---------------------------------------------------------------------------------------
+        self.key_string_value_json_storage_cls: type[BaseKVStorage] = self.kv_storage  # type: ignore
+
         self.key_string_value_json_storage_cls = partial(  # type: ignore
             self.key_string_value_json_storage_cls, global_config=global_config
         )
+
+        # ---------------------------------------------------------------------------------------
+        self.vector_db_storage_cls: type[BaseVectorStorage] = self.vector_storage  # type: ignore
+
+
         self.vector_db_storage_cls = partial(  # type: ignore
             self.vector_db_storage_cls, global_config=global_config
         )
+
+    
+        # ---------------------------------------------------------------------------------------
+        self.graph_storage_cls: type[BaseGraphStorage] = self.graph_storage # type: ignore
+
         self.graph_storage_cls = partial(  # type: ignore
             self.graph_storage_cls, global_config=global_config
         )
 
+        
+        # have to check it
+
         # Initialize document status storage
-        self.doc_status_storage_cls = self._get_storage_class(self.doc_status_storage)
+
+        self.doc_status_storage_cls:type[BaseKVStorage] = self.doc_status_storage
 
         self.llm_response_cache: BaseKVStorage = self.key_string_value_json_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.KV_STORE_LLM_RESPONSE_CACHE
+                "WORKSPACE", NameSpace.KV_STORE_LLM_RESPONSE_CACHE
             ),
             global_config=asdict(
                 self
@@ -328,7 +381,7 @@ class LightRAG:
 
         self.full_docs: BaseKVStorage = self.key_string_value_json_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.KV_STORE_FULL_DOCS
+                "WORKSPACE", NameSpace.KV_STORE_FULL_DOCS
             ),
             embedding_func=self.embedding_func,
         )
@@ -336,34 +389,36 @@ class LightRAG:
         # TODO: deprecating, text_chunks is redundant with chunks_vdb
         self.text_chunks: BaseKVStorage = self.key_string_value_json_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.KV_STORE_TEXT_CHUNKS
+                "WORKSPACE", NameSpace.KV_STORE_TEXT_CHUNKS
             ),
             embedding_func=self.embedding_func,
         )
         self.chunk_entity_relation_graph: BaseGraphStorage = self.graph_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION
+                "WORKSPACE", NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION
             ),
             embedding_func=self.embedding_func,
         )
 
         self.entities_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.VECTOR_STORE_ENTITIES
+                "WORKSPACE", NameSpace.VECTOR_STORE_ENTITIES
             ),
             embedding_func=self.embedding_func,
             meta_fields={"entity_name", "source_id", "content", "file_path"},
         )
+
         self.relationships_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.VECTOR_STORE_RELATIONSHIPS
+                "WORKSPACE", NameSpace.VECTOR_STORE_RELATIONSHIPS
             ),
             embedding_func=self.embedding_func,
             meta_fields={"src_id", "tgt_id", "source_id", "content", "file_path"},
         )
+
         self.chunks_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=make_namespace(
-                self.namespace_prefix, NameSpace.VECTOR_STORE_CHUNKS
+                "WORKSPACE", NameSpace.VECTOR_STORE_CHUNKS
             ),
             embedding_func=self.embedding_func,
             meta_fields={"full_doc_id", "content", "file_path"},
@@ -371,26 +426,70 @@ class LightRAG:
 
         # Initialize document status storage
         self.doc_status: DocStatusStorage = self.doc_status_storage_cls(
-            namespace=make_namespace(self.namespace_prefix, NameSpace.DOC_STATUS),
+            namespace=make_namespace("WORKSPACE", NameSpace.DOC_STATUS),
             global_config=global_config,
             embedding_func=None,
         )
 
-        # Directly use llm_response_cache, don't create a new object
-        hashing_kv = self.llm_response_cache
 
-        self.llm_model_func = priority_limit_async_func_call(self.llm_model_max_async)(
-            partial(
-                self.llm_model_func,  # type: ignore
-                hashing_kv=hashing_kv,
-                **self.llm_model_kwargs,
-            )
-        )
+        #  have to look at caching
+
+        # # Directly use llm_response_cache, don't create a new object
+        # hashing_kv = self.llm_response_cache
+
+        # self.llm_model_func = priority_limit_async_func_call(self.llm_model_max_async)(
+        #     partial(
+        #         self.llm_model_func,  # type: ignore
+        #         hashing_kv=hashing_kv,
+        #         **self.llm_model_kwargs,
+        #     )
+        # )
+
+        # my llm_model_func without hashing 
+
+        self.llm_model_func = partial( self.llm_model_func,  # type: ignore
+                                    #   hashing_kv=hashing_kv,
+                                      **self.llm_model_kwargs,
+                                     )
+         
+
+
+
 
         self._storages_status = StoragesStatus.CREATED
+        
+        #  have to look at it 
+        # if self.auto_manage_storages_states:
+        #     self._run_async_safely(self.initialize_storages, "Storage Initialization")
 
-        if self.auto_manage_storages_states:
-            self._run_async_safely(self.initialize_storages, "Storage Initialization")
+
+    #  have to look at the cast logic 
+    async def _insert_done(
+        self, pipeline_status=None, pipeline_status_lock=None
+    ) -> None:
+        tasks = [
+            cast(StorageNameSpace, storage_inst).index_done_callback()
+            for storage_inst in [  # type: ignore
+                self.full_docs,
+                self.text_chunks,
+                self.llm_response_cache,
+                self.entities_vdb,
+                self.relationships_vdb,
+                self.chunks_vdb,
+                self.chunk_entity_relation_graph,
+            ]
+            if storage_inst is not None
+        ]
+        await asyncio.gather(*tasks)
+
+        log_message = "In memory DB persist to disk"
+        logger.info(log_message)
+
+        if pipeline_status is not None and pipeline_status_lock is not None:
+            async with pipeline_status_lock:
+                pipeline_status["latest_message"] = log_message
+                pipeline_status["history_messages"].append(log_message)
+
 
 
     async def _process_entity_relation_graph(
@@ -654,9 +753,10 @@ class LightRAG:
                                     if not task.done():
                                         task.cancel()
 
-                            # Persistent llm cache
-                            if self.llm_response_cache:
-                                await self.llm_response_cache.index_done_callback()
+                            # have to check it
+                            # # Persistent llm cache
+                            # if self.llm_response_cache:
+                            #     await self.llm_response_cache.index_done_callback()
 
                             # Update document status to failed
                             await self.doc_status.upsert(
@@ -734,9 +834,10 @@ class LightRAG:
                                 )
                                 pipeline_status["history_messages"].append(error_msg)
 
-                            # Persistent llm cache
-                            if self.llm_response_cache:
-                                await self.llm_response_cache.index_done_callback()
+                            # have to check it
+                            # # Persistent llm cache
+                            # if self.llm_response_cache:
+                            #     await self.llm_response_cache.index_done_callback()
 
                             # Update document status to failed
                             await self.doc_status.upsert(
@@ -1013,30 +1114,104 @@ class LightRAG:
                 system_prompt=system_prompt,
                 chunks_vdb=self.chunks_vdb,
             )
-        elif param.mode == "naive":
-            response = await naive_query(
-                query.strip(),
-                self.chunks_vdb,
-                param,
-                global_config,
-                hashing_kv=self.llm_response_cache,
-                system_prompt=system_prompt,
-            )
-        elif param.mode == "bypass":
-            # Bypass mode: directly use LLM without knowledge retrieval
-            use_llm_func = param.model_func or global_config["llm_model_func"]
-            # Apply higher priority (8) to entity/relation summary tasks
-            use_llm_func = partial(use_llm_func, _priority=8)
+        # elif param.mode == "naive":
+        #     response = await naive_query(
+        #         query.strip(),
+        #         self.chunks_vdb,
+        #         param,
+        #         global_config,
+        #         hashing_kv=self.llm_response_cache,
+        #         system_prompt=system_prompt,
+        #     )
+        # elif param.mode == "bypass":
+        #     # Bypass mode: directly use LLM without knowledge retrieval
+        #     use_llm_func = param.model_func or global_config["llm_model_func"]
+        #     # Apply higher priority (8) to entity/relation summary tasks
+        #     use_llm_func = partial(use_llm_func, _priority=8)
 
-            param.stream = True if param.stream is None else param.stream
-            response = await use_llm_func(
-                query.strip(),
-                system_prompt=system_prompt,
-                history_messages=param.conversation_history,
-                stream=param.stream,
-            )
+        #     param.stream = True if param.stream is None else param.stream
+        #     response = await use_llm_func(
+        #         query.strip(),
+        #         system_prompt=system_prompt,
+        #         history_messages=param.conversation_history,
+        #         stream=param.stream,
+        #     )
         else:
             raise ValueError(f"Unknown mode {param.mode}")
         await self._query_done()
         return response
+    async def finalize_storages(self):
+        """Asynchronously finalize the storages"""
+        if self._storages_status == StoragesStatus.INITIALIZED:
+            tasks = []
+
+            for storage in (
+                self.full_docs,
+                self.text_chunks,
+                self.entities_vdb,
+                self.relationships_vdb,
+                self.chunks_vdb,
+                self.chunk_entity_relation_graph,
+                self.llm_response_cache,
+                self.doc_status,
+            ):
+                if storage:
+                    tasks.append(storage.finalize())
+
+            await asyncio.gather(*tasks)
+
+            self._storages_status = StoragesStatus.FINALIZED
+            logger.debug("Finalized Storages")
+
+    async def get_graph_labels(self):
+        text = await self.chunk_entity_relation_graph.get_all_labels()
+        return text
+
+    async def get_knowledge_graph(
+        self,
+        node_label: str,
+        max_depth: int = 3,
+        max_nodes: int = 1000,
+    ) -> KnowledgeGraph:
+        """Get knowledge graph for a given label
+
+        Args:
+            node_label (str): Label to get knowledge graph for
+            max_depth (int): Maximum depth of graph
+            max_nodes (int, optional): Maximum number of nodes to return. Defaults to 1000.
+
+        Returns:
+            KnowledgeGraph: Knowledge graph containing nodes and edges
+        """
+
+        return await self.chunk_entity_relation_graph.get_knowledge_graph(
+            node_label, max_depth, max_nodes
+        )
+
+    def insert(
+        self,
+        input: str | list[str],
+        split_by_character: str | None = None,
+        split_by_character_only: bool = False,
+        ids: str | list[str] | None = None,
+        file_paths: str | list[str] | None = None,
+    ) -> None:
+        """Sync Insert documents with checkpoint support
+
+        Args:
+            input: Single document string or list of document strings
+            split_by_character: if split_by_character is not None, split the string by character, if chunk longer than
+            chunk_token_size, it will be split again by token size.
+            split_by_character_only: if split_by_character_only is True, split the string by character only, when
+            split_by_character is None, this parameter is ignored.
+            ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
+            file_paths: single string of the file path or list of file paths, used for citation
+        """
+        loop = always_get_an_event_loop()
+        loop.run_until_complete(
+            self.ainsert(
+                input, split_by_character, split_by_character_only, ids, file_paths
+            )
+        )
+
 

@@ -1,2 +1,6 @@
 have to add BGE
 have to understand the cache logic 
+have to read about the extract keywords function
+in original lightrag open ai example 
+  -  rag local variavble in final
+  -  Embedding func

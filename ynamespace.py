@@ -13,5 +13,5 @@ class NameSpace:
 
     DOC_STATUS = "doc_status"
 
-    def make_namespace(prefix: str, base_namespace: str):
-        return prefix + base_namespace
+def make_namespace(prefix: str, base_namespace: str):
+    return prefix + base_namespace

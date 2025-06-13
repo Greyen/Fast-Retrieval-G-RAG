@@ -22,6 +22,206 @@ from ylightRag.yconstants import (
     DEFAULT_LOG_FILENAME,
 )
 
+# Use TYPE_CHECKING to avoid circular imports
+if TYPE_CHECKING:
+    from .ybase import BaseKVStorage
+
+def get_env_value(
+    env_key: str, default: any, value_type: type = str, special_none: bool = False
+) -> any:
+    """
+    Get value from environment variable with type conversion
+
+    Args:
+        env_key (str): Environment variable key
+        default (any): Default value if env variable is not set
+        value_type (type): Type to convert the value to
+        special_none (bool): If True, return None when value is "None"
+
+    Returns:
+        any: Converted value from environment or default
+    """
+    value = os.getenv(env_key)
+    if value is None:
+        return default
+
+    # Handle special case for "None" string
+    if special_none and value == "None":
+        return None
+
+    if value_type is bool:
+        return value.lower() in ("true", "1", "yes", "t", "on")
+    try:
+        return value_type(value)
+    except (ValueError, TypeError):
+        return default
+    
+# use the .env that is inside the current folder
+# allows to use different .env file for each lightrag instance
+# the OS environment variables take precedence over the .env file
+load_dotenv(dotenv_path=".env", override=False)
+
+VERBOSE_DEBUG = os.getenv("VERBOSE", "false").lower() == "true"
+
+
+def verbose_debug(msg: str, *args, **kwargs):
+    """Function for outputting detailed debug information.
+    When VERBOSE_DEBUG=True, outputs the complete message.
+    When VERBOSE_DEBUG=False, outputs only the first 50 characters.
+
+    Args:
+        msg: The message format string
+        *args: Arguments to be formatted into the message
+        **kwargs: Keyword arguments passed to logger.debug()
+    """
+    if VERBOSE_DEBUG:
+        logger.debug(msg, *args, **kwargs)
+    else:
+        # Format the message with args first
+        if args:
+            formatted_msg = msg % args
+        else:
+            formatted_msg = msg
+        # Then truncate the formatted message
+        truncated_msg = (
+            formatted_msg[:100] + "..." if len(formatted_msg) > 100 else formatted_msg
+        )
+        logger.debug(truncated_msg, **kwargs)
+
+def set_verbose_debug(enabled: bool):
+    """Enable or disable verbose debug output"""
+    global VERBOSE_DEBUG
+    VERBOSE_DEBUG = enabled
+
+statistic_data = {"llm_call": 0, "llm_cache": 0, "embed_call": 0}
+
+# Initialize logger
+logger = logging.getLogger("lightrag")
+logger.propagate = False  # prevent log message send to root loggger
+# Let the main application configure the handlers
+logger.setLevel(logging.INFO)
+
+# Set httpx logging level to WARNING
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class LightragPathFilter(logging.Filter):
+    """Filter for lightrag logger to filter out frequent path access logs"""
+
+    def __init__(self):
+        super().__init__()
+        # Define paths to be filtered
+        self.filtered_paths = [
+            "/documents",
+            "/health",
+            "/webui/",
+            "/documents/pipeline_status",
+        ]
+        # self.filtered_paths = ["/health", "/webui/"]
+
+    def filter(self, record):
+        try:
+            # Check if record has the required attributes for an access log
+            if not hasattr(record, "args") or not isinstance(record.args, tuple):
+                return True
+            if len(record.args) < 5:
+                return True
+
+            # Extract method, path and status from the record args
+            method = record.args[1]
+            path = record.args[2]
+            status = record.args[4]
+
+            # Filter out successful GET requests to filtered paths
+            if (
+                method == "GET"
+                and (status == 200 or status == 304)
+                and path in self.filtered_paths
+            ):
+                return False
+
+            return True
+        except Exception:
+            # In case of any error, let the message through
+            return True
+        
+def setup_logger(
+    logger_name: str,
+    level: str = "INFO",
+    add_filter: bool = False,
+    log_file_path: str | None = None,
+    enable_file_logging: bool = True,
+):
+    """Set up a logger with console and optionally file handlers
+
+    Args:
+        logger_name: Name of the logger to set up
+        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        add_filter: Whether to add LightragPathFilter to the logger
+        log_file_path: Path to the log file. If None and file logging is enabled, defaults to lightrag.log in LOG_DIR or cwd
+        enable_file_logging: Whether to enable logging to a file (defaults to True)
+    """
+    # Configure formatters
+    detailed_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    simple_formatter = logging.Formatter("%(levelname)s: %(message)s")
+
+    logger_instance = logging.getLogger(logger_name)
+    logger_instance.setLevel(level)
+    logger_instance.handlers = []  # Clear existing handlers
+    logger_instance.propagate = False
+
+    # Add console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(simple_formatter)
+    console_handler.setLevel(level)
+    logger_instance.addHandler(console_handler)
+
+    # Add file handler by default unless explicitly disabled
+    if enable_file_logging:
+        # Get log file path
+        if log_file_path is None:
+            log_dir = os.getenv("LOG_DIR", os.getcwd())
+            log_file_path = os.path.abspath(os.path.join(log_dir, DEFAULT_LOG_FILENAME))
+
+        # Ensure log directory exists
+        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+        # Get log file max size and backup count from environment variables
+        log_max_bytes = get_env_value("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES, int)
+        log_backup_count = get_env_value(
+            "LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT, int
+        )
+
+        try:
+            # Add file handler
+            file_handler = logging.handlers.RotatingFileHandler(
+                filename=log_file_path,
+                maxBytes=log_max_bytes,
+                backupCount=log_backup_count,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(detailed_formatter)
+            file_handler.setLevel(level)
+            logger_instance.addHandler(file_handler)
+        except PermissionError as e:
+            logger.warning(f"Could not create log file at {log_file_path}: {str(e)}")
+            logger.warning("Continuing with console logging only")
+
+    # Add path filter if requested
+    if add_filter:
+        path_filter = LightragPathFilter()
+        logger_instance.addFilter(path_filter)
+
+class UnlimitedSemaphore:
+    """A context manager that allows unlimited access."""
+
+    async def __aenter__(self):
+        pass
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
 
 def clean_text(text: str) -> str:
     """Clean text by removing null bytes (0x00) and whitespace
@@ -143,6 +343,24 @@ def get_content_summary(content: str, max_length: int = 250) -> str:
         return content
     return content[:max_length] + "..."
 
+def compute_args_hash(*args: Any, cache_type: str | None = None) -> str:
+    """Compute a hash for the given arguments.
+    Args:
+        *args: Arguments to hash
+        cache_type: Type of cache (e.g., 'keywords', 'query', 'extract')
+    Returns:
+        str: Hash string
+    """
+    import hashlib
+
+    # Convert all arguments to strings and join them
+    args_str = "".join([str(arg) for arg in args])
+    if cache_type:
+        args_str = f"{cache_type}:{args_str}"
+
+    # Compute MD5 hash
+    return hashlib.md5(args_str.encode()).hexdigest()
+
 
 def get_env_value(
     env_key: str, default: any, value_type: type = str, special_none: bool = False
@@ -175,41 +393,20 @@ def get_env_value(
         return default
 
 
-# Use TYPE_CHECKING to avoid circular imports
-if TYPE_CHECKING:
-    from lightrag.base import BaseKVStorage
-
-# use the .env that is inside the current folder
-# allows to use different .env file for each lightrag instance
-# the OS environment variables take precedence over the .env file
-load_dotenv(dotenv_path=".env", override=False)
-
-VERBOSE_DEBUG = os.getenv("VERBOSE", "false").lower() == "true"
-
-
-def verbose_debug(msg: str, *args, **kwargs):
-    """Function for outputting detailed debug information.
-    When VERBOSE_DEBUG=True, outputs the complete message.
-    When VERBOSE_DEBUG=False, outputs only the first 50 characters.
+def get_content_summary(content: str, max_length: int = 250) -> str:
+    """Get summary of document content
 
     Args:
-        msg: The message format string
-        *args: Arguments to be formatted into the message
-        **kwargs: Keyword arguments passed to logger.debug()
+        content: Original document content
+        max_length: Maximum length of summary
+
+    Returns:
+        Truncated content with ellipsis if needed
     """
-    if VERBOSE_DEBUG:
-        logger.debug(msg, *args, **kwargs)
-    else:
-        # Format the message with args first
-        if args:
-            formatted_msg = msg % args
-        else:
-            formatted_msg = msg
-        # Then truncate the formatted message
-        truncated_msg = (
-            formatted_msg[:100] + "..." if len(formatted_msg) > 100 else formatted_msg
-        )
-        logger.debug(truncated_msg, **kwargs)
+    content = content.strip()
+    if len(content) <= max_length:
+        return content
+    return content[:max_length] + "..."
 
 
 def set_verbose_debug(enabled: bool):

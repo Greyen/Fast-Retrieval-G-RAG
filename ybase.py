@@ -1,14 +1,22 @@
 from typing import (
     Any,
     TypedDict,
+    Literal,
+    Callable
+
 )
+
+from dataclasses import field , dataclass
+import os
+from .ytypes import KnowledgeGraph 
+from abc import ABC , abstractmethod
 
 class TextChunkSchema(TypedDict):
     tokens: int
     content: str
     full_doc_id: str
     chunk_order_index: int
-
+from .yutils import EmbeddingFunc
 from enum import Enum
 
 class StoragesStatus(str, Enum):
@@ -26,6 +34,174 @@ class DocStatus(str, Enum):
     PROCESSING = "processing"
     PROCESSED = "processed"
     FAILED = "failed"
+
+@dataclass
+class QueryParam:
+    """Configuration parameters for query execution in LightRAG."""
+
+    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass"] = "global"
+    """Specifies the retrieval mode:
+    - "local": Focuses on context-dependent information.
+    - "global": Utilizes global knowledge.
+    - "hybrid": Combines local and global retrieval methods.
+    - "naive": Performs a basic search without advanced techniques.
+    - "mix": Integrates knowledge graph and vector retrieval.
+    """
+
+    only_need_context: bool = False
+    """If True, only returns the retrieved context without generating a response."""
+
+    only_need_prompt: bool = False
+    """If True, only returns the generated prompt without producing a response."""
+
+    response_type: str = "Multiple Paragraphs"
+    """Defines the response format. Examples: 'Multiple Paragraphs', 'Single Paragraph', 'Bullet Points'."""
+
+    stream: bool = False
+    """If True, enables streaming output for real-time responses."""
+
+    top_k: int = int(os.getenv("TOP_K", "60"))
+    """Number of top items to retrieve. Represents entities in 'local' mode and relationships in 'global' mode."""
+
+    max_token_for_text_unit: int = int(os.getenv("MAX_TOKEN_TEXT_CHUNK", "4000"))
+    """Maximum number of tokens allowed for each retrieved text chunk."""
+
+    max_token_for_global_context: int = int(
+        os.getenv("MAX_TOKEN_RELATION_DESC", "4000")
+    )
+    """Maximum number of tokens allocated for relationship descriptions in global retrieval."""
+
+    max_token_for_local_context: int = int(os.getenv("MAX_TOKEN_ENTITY_DESC", "4000"))
+    """Maximum number of tokens allocated for entity descriptions in local retrieval."""
+
+    hl_keywords: list[str] = field(default_factory=list)
+    """List of high-level keywords to prioritize in retrieval."""
+
+    ll_keywords: list[str] = field(default_factory=list)
+    """List of low-level keywords to refine retrieval focus."""
+
+    conversation_history: list[dict[str, str]] = field(default_factory=list)
+    """Stores past conversation history to maintain context.
+    Format: [{"role": "user/assistant", "content": "message"}].
+    """
+
+    history_turns: int = 3
+    """Number of complete conversation turns (user-assistant pairs) to consider in the response context."""
+
+    ids: list[str] | None = None
+    """List of ids to filter the results."""
+
+    model_func: Callable[..., object] | None = None
+    """Optional override for the LLM model function to use for this specific query.
+    If provided, this will be used instead of the global model function.
+    This allows using different models for different query modes.
+    """
+
+    user_prompt: str | None = None
+    """User-provided prompt for the query.
+    If proivded, this will be use instead of the default vaulue from prompt template.
+    """
+
+
+@dataclass
+class StorageNameSpace(ABC):
+    namespace: str
+    global_config: dict[str, Any]
+
+    async def initialize(self):
+        """Initialize the storage"""
+        pass
+
+    async def finalize(self):
+        """Finalize the storage"""
+        pass
+
+    @abstractmethod
+    async def index_done_callback(self) -> None:
+        """Commit the storage operations after indexing"""
+
+    @abstractmethod
+    async def drop(self) -> dict[str, str]:
+        """Drop all data from storage and clean up resources
+
+        This abstract method defines the contract for dropping all data from a storage implementation.
+        Each storage type must implement this method to:
+        1. Clear all data from memory and/or external storage
+        2. Remove any associated storage files if applicable
+        3. Reset the storage to its initial state
+        4. Handle cleanup of any resources
+        5. Notify other processes if necessary
+        6. This action should persistent the data to disk immediately.
+
+        Returns:
+            dict[str, str]: Operation status and message with the following format:
+                {
+                    "status": str,  # "success" or "error"
+                    "message": str  # "data dropped" on success, error details on failure
+                }
+
+        Implementation specific:
+        - On success: return {"status": "success", "message": "data dropped"}
+        - On failure: return {"status": "error", "message": "<error details>"}
+        - If not supported: return {"status": "error", "message": "unsupported"}
+        """
+
+
+@dataclass
+class BaseKVStorage(StorageNameSpace, ABC):
+    embedding_func: EmbeddingFunc
+
+    @abstractmethod
+    async def get_by_id(self, id: str) -> dict[str, Any] | None:
+        """Get value by id"""
+
+    @abstractmethod
+    async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
+        """Get values by ids"""
+
+    @abstractmethod
+    async def filter_keys(self, keys: set[str]) -> set[str]:
+        """Return un-exist keys"""
+
+    @abstractmethod
+    async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
+        """Upsert data
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+        """
+
+    @abstractmethod
+    async def delete(self, ids: list[str]) -> None:
+        """Delete specific records from storage by their IDs
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+
+        Args:
+            ids (list[str]): List of document IDs to be deleted from storage
+
+        Returns:
+            None
+        """
+
+    async def drop_cache_by_modes(self, modes: list[str] | None = None) -> bool:
+        """Delete specific records from storage by cache mode
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+
+        Args:
+            modes (list[str]): List of cache modes to be dropped from storage
+
+        Returns:
+             True: if the cache drop successfully
+             False: if the cache drop failed, or the cache mode is not supported
+        """
+
 
 @dataclass
 class DocProcessingStatus:
@@ -69,6 +245,62 @@ class DocStatusStorage(BaseKVStorage, ABC):
     async def drop_cache_by_modes(self, modes: list[str] | None = None) -> bool:
         """Drop cache is not supported for Doc Status storage"""
         return False
+    
+
+@dataclass
+class BaseKVStorage(StorageNameSpace, ABC):
+    embedding_func: EmbeddingFunc
+
+    @abstractmethod
+    async def get_by_id(self, id: str) -> dict[str, Any] | None:
+        """Get value by id"""
+
+    @abstractmethod
+    async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
+        """Get values by ids"""
+
+    @abstractmethod
+    async def filter_keys(self, keys: set[str]) -> set[str]:
+        """Return un-exist keys"""
+
+    @abstractmethod
+    async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
+        """Upsert data
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+        """
+
+    @abstractmethod
+    async def delete(self, ids: list[str]) -> None:
+        """Delete specific records from storage by their IDs
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+
+        Args:
+            ids (list[str]): List of document IDs to be deleted from storage
+
+        Returns:
+            None
+        """
+
+    async def drop_cache_by_modes(self, modes: list[str] | None = None) -> bool:
+        """Delete specific records from storage by cache mode
+
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+
+        Args:
+            modes (list[str]): List of cache modes to be dropped from storage
+
+        Returns:
+             True: if the cache drop successfully
+             False: if the cache drop failed, or the cache mode is not supported
+        """
 
 
 # Graph Storage 
