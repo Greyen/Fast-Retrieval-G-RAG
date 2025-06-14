@@ -420,8 +420,12 @@ async def _handle_entity_relation_summary(
     If too long, use LLM to summarize.
     """
     use_llm_func: callable = global_config["llm_model_func"]
-    # Apply higher priority (8) to entity/relation summary tasks
-    use_llm_func = partial(use_llm_func, _priority=8)
+
+    # have to change it here 
+    # # Apply higher priority (8) to entity/relation summary tasks
+    # use_llm_func = partial(use_llm_func, _priority=8)
+
+    
 
     tokenizer: Tokenizer = global_config["tokenizer"]
     llm_max_tokens = global_config["llm_model_max_token_size"]
@@ -970,8 +974,9 @@ async def extract_keywords_only(
         use_model_func = param.model_func
     else:
         use_model_func = global_config["llm_model_func"]
-        # Apply higher priority (5) to query relation LLM function
-        use_model_func = partial(use_model_func, _priority=5)
+        # have to change it here
+        # # Apply higher priority (5) to query relation LLM function
+        # use_model_func = partial(use_model_func, _priority=5)
 
     result = await use_model_func(kw_prompt, keyword_extraction=True)
 

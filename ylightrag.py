@@ -14,6 +14,7 @@ from .ybase import BaseGraphStorage
 from .ybase import BaseVectorStorage
 from .ybase import BaseKVStorage
 from .yVectordb.qdrant_impl import QdrantVectorDBStorage
+from .yVectordb.nano_vector_db_impl import NanoVectorDBStorage
 from .yKV.json_kv_impl import JsonKVStorage
 from .yKV.json_doc_status_impl import JsonDocStatusStorage
 
@@ -78,8 +79,9 @@ class LightRAG:
     
     # """Storage backend for vector embeddings."""
     # using qdrant for storing the vector 
-    vector_storage: BaseVectorStorage  = QdrantVectorDBStorage
-    
+    # vector_storage: BaseVectorStorage  = QdrantVectorDBStorage
+
+    vector_storage: BaseVectorStorage  = NanoVectorDBStorage
 
     # """Storage backend for knowledge graphs."""
     # using neo4J for the graphs
@@ -1140,6 +1142,8 @@ class LightRAG:
             raise ValueError(f"Unknown mode {param.mode}")
         await self._query_done()
         return response
+    async def _query_done(self):
+        await self.llm_response_cache.index_done_callback()
     async def finalize_storages(self):
         """Asynchronously finalize the storages"""
         if self._storages_status == StoragesStatus.INITIALIZED:
